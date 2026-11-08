@@ -1,0 +1,197 @@
+name: Build Noor Tasbih Android APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout Repository Files
+        uses: actions/checkout@v4
+
+      - name: 2. Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 3. Prepare Android Project & Build APK
+        run: |
+          set -e
+          mkdir -p app/src/main/assets app/src/main/java/com/noortasbih/app
+
+          # 1. Ensure index.html is in app/src/main/assets/index.html
+          if [ -f "app/src/main/assets/index.html" ]; then
+            echo "Using existing app/src/main/assets/index.html"
+          elif [ -f "Noor-Tasbih-Standalone.html" ]; then
+            cp "Noor-Tasbih-Standalone.html" app/src/main/assets/index.html
+          elif [ -f "tasbih-app.html" ]; then
+            cp "tasbih-app.html" app/src/main/assets/index.html
+          elif [ -f "Noor-Tasbih-App.html" ]; then
+            cp "Noor-Tasbih-App.html" app/src/main/assets/index.html
+          fi
+
+          # 2. Write clean settings.gradle & gradle.properties
+          cat << 'GRADLE_SET' > settings.gradle
+          rootProject.name = "NoorTasbih"
+          include ':app'
+          GRADLE_SET
+
+          cat << 'GRADLE_PROPS' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          GRADLE_PROPS
+
+          # 3. Write root build.gradle
+          cat << 'GRADLE_ROOT' > build.gradle
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.2.2'
+              }
+          }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          GRADLE_ROOT
+
+          # 4. Write app/build.gradle
+          cat << 'GRADLE_APP' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.noortasbih.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.noortasbih.app"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          GRADLE_APP
+
+          # 5. Overwrite AndroidManifest.xml (fixes AGP 8+ fatal error caused by deprecated package="..." attribute)
+          cat << 'MANIFEST_EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.BLUETOOTH" />
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+              <application
+                  android:allowBackup="true"
+                  android:label="Noor Tasbih"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          MANIFEST_EOF
+
+          # 6. Write MainActivity.java
+          cat << 'JAVA_EOF' > app/src/main/java/com/noortasbih/app/MainActivity.java
+          package com.noortasbih.app;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.view.KeyEvent;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+
+          public class MainActivity extends Activity {
+              private WebView webView;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  webView = new WebView(this);
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setAllowFileAccess(true);
+                  settings.setMediaPlaybackRequiresUserGesture(false);
+
+                  webView.setWebViewClient(new WebViewClient());
+                  webView.setWebChromeClient(new WebChromeClient());
+                  webView.loadUrl("file:///android_asset/index.html");
+                  setContentView(webView);
+              }
+
+              @Override
+              public boolean dispatchKeyEvent(KeyEvent event) {
+                  int keyCode = event.getKeyCode();
+                  if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_SPACE) {
+                      if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                          webView.evaluateJavascript("if (typeof incrementActivePrayer === 'function') incrementActivePrayer();", null);
+                      }
+                      return true;
+                  }
+                  if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                      if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                          webView.evaluateJavascript("if (typeof executeMappedRingAction === 'function') executeMappedRingAction(appState.sideBtnAction, 'Volume/Side Key');", null);
+                      }
+                      return true;
+                  }
+                  return super.dispatchKeyEvent(event);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null) {
+                      webView.evaluateJavascript("(typeof window.handleAppBackNavigation === 'function') ? window.handleAppBackNavigation() : true", new android.webkit.ValueCallback<String>() {
+                          @Override
+                          public void onReceiveValue(String value) {
+                              if ("true".equals(value)) {
+                                  MainActivity.super.onBackPressed();
+                              }
+                          }
+                      });
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          JAVA_EOF
+
+          # 7. Accept Android SDK Licenses & Run Gradle 8.5 Directly (bypasses setup-gradle Cache 400 error)
+          if [ -n "$ANDROID_HOME" ] && [ -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
+
+          curl -sL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o /tmp/gradle-8.5.zip
+          unzip -q /tmp/gradle-8.5.zip -d /tmp
+          /tmp/gradle-8.5/bin/gradle assembleDebug --no-daemon
+
+      - name: 4. Upload Compiled APK for Download
+        uses: actions/upload-artifact@v4
+        with:
+          name: Noor-Tasbih-Android-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
